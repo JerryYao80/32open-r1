@@ -13,10 +13,12 @@
 # limitations under the License.
 
 """
+监督微调(SFT)脚本，用于decoder语言模型的训练。
 Supervised fine-tuning script for decoder language models.
 
-Usage:
+使用方法 Usage:
 
+# 在一个节点上使用8个H100 GPU
 # One 1 node of 8 x H100s
 accelerate launch --config_file=recipes/accelerate_configs/zero3.yaml src/open_r1/sft.py \
     --model_name_or_path Qwen/Qwen2.5-1.5B-Instruct \
@@ -63,11 +65,21 @@ logger = logging.getLogger(__name__)
 
 
 def main(script_args, training_args, model_args):
+    """
+    主函数：执行SFT训练的完整流程
+    Main function: Execute the complete process of SFT training
+    
+    Args:
+        script_args: 脚本参数，包含数据集配置等
+        training_args: 训练参数，包含学习率、批次大小等
+        model_args: 模型参数，包含模型路径、量化配置等
+    """
+    # 设置随机种子以确保可重现性
     # Set seed for reproducibility
     set_seed(training_args.seed)
 
     ###############
-    # Setup logging
+    # 设置日志记录 Setup logging
     ###############
     logging.basicConfig(
         format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
@@ -81,6 +93,7 @@ def main(script_args, training_args, model_args):
     transformers.utils.logging.enable_default_handler()
     transformers.utils.logging.enable_explicit_format()
 
+    # 在每个进程上记录简要信息
     # Log on each process a small summary
     logger.warning(
         f"Process rank: {training_args.local_rank}, device: {training_args.device}, n_gpu: {training_args.n_gpu}"
@@ -90,6 +103,7 @@ def main(script_args, training_args, model_args):
     logger.info(f"Script parameters {script_args}")
     logger.info(f"Data parameters {training_args}")
 
+    # 检查是否存在上次的检查点
     # Check for last checkpoint
     last_checkpoint = None
     if os.path.isdir(training_args.output_dir):
@@ -98,12 +112,12 @@ def main(script_args, training_args, model_args):
         logger.info(f"Checkpoint detected, resuming training at {last_checkpoint=}.")
 
     ################
-    # Load datasets
+    # 加载数据集 Load datasets
     ################
     dataset = load_dataset(script_args.dataset_name, name=script_args.dataset_config)
 
     ################
-    # Load tokenizer
+    # 加载分词器 Load tokenizer
     ################
     tokenizer = AutoTokenizer.from_pretrained(
         model_args.model_name_or_path, trust_remote_code=model_args.trust_remote_code, use_fast=True
@@ -111,12 +125,13 @@ def main(script_args, training_args, model_args):
     tokenizer.pad_token = tokenizer.eos_token
 
     ###################
-    # Model init kwargs
+    # 初始化模型参数 Model init kwargs
     ###################
     logger.info("*** Initializing model kwargs ***")
     torch_dtype = (
         model_args.torch_dtype if model_args.torch_dtype in ["auto", None] else getattr(torch, model_args.torch_dtype)
     )
+    # 获取量化配置
     quantization_config = get_quantization_config(model_args)
     model_kwargs = dict(
         revision=model_args.model_revision,
@@ -130,7 +145,7 @@ def main(script_args, training_args, model_args):
     training_args.model_init_kwargs = model_kwargs
 
     ############################
-    # Initialize the SFT Trainer
+    # 初始化SFT训练器 Initialize the SFT Trainer
     ############################
     trainer = SFTTrainer(
         model=model_args.model_name_or_path,
@@ -143,7 +158,7 @@ def main(script_args, training_args, model_args):
     )
 
     ###############
-    # Training loop
+    # 训练循环 Training loop
     ###############
     logger.info("*** Train ***")
     checkpoint = None
@@ -159,12 +174,13 @@ def main(script_args, training_args, model_args):
     trainer.save_state()
 
     ##################################
-    # Save model and create model card
+    # 保存模型并创建模型卡片 Save model and create model card
     ##################################
     logger.info("*** Save model ***")
     trainer.save_model(training_args.output_dir)
     logger.info(f"Model saved to {training_args.output_dir}")
 
+    # 在主进程上保存其他内容
     # Save everything else on main process
     kwargs = {
         "dataset_name": script_args.dataset_name,
@@ -172,12 +188,13 @@ def main(script_args, training_args, model_args):
     }
     if trainer.accelerator.is_main_process:
         trainer.create_model_card(**kwargs)
+        # 恢复k,v缓存以加速推理
         # Restore k,v cache for fast inference
         trainer.model.config.use_cache = True
         trainer.model.config.save_pretrained(training_args.output_dir)
 
     ##########
-    # Evaluate
+    # 评估 Evaluate
     ##########
     if training_args.do_eval:
         logger.info("*** Evaluate ***")
@@ -187,7 +204,7 @@ def main(script_args, training_args, model_args):
         trainer.save_metrics("eval", metrics)
 
     #############
-    # push to hub
+    # 推送到hub push to hub
     #############
     if training_args.push_to_hub:
         logger.info("Pushing to hub...")
@@ -195,6 +212,7 @@ def main(script_args, training_args, model_args):
 
 
 if __name__ == "__main__":
+    # 解析命令行参数和配置
     parser = TrlParser((ScriptArguments, SFTConfig, ModelConfig))
     script_args, training_args, model_args = parser.parse_args_and_config()
     main(script_args, training_args, model_args)
